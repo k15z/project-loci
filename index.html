@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Project Loci</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css" />
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/bulma/0.4.2/css/bulma.min.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.2.0/dist/leaflet.css"/>
+    <script src='https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.0/MathJax.js?config=TeX-MML-AM_CHTML'></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.2.1/jquery.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/2.4.2/vue.min.js"></script>
+    <script src="https://unpkg.com/vue-chartjs/dist/vue-chartjs.full.min.js"></script>
+    <script src="https://unpkg.com/leaflet@1.2.0/dist/leaflet.js"></script>
+    <style>
+        .hero {
+            background-image: linear-gradient(to bottom, rgba(0,0,0,0.3) 0%,rgba(0,0,0,0.5) 100%), url("image/earth-at-night.jpeg");
+        }
+
+        .container {
+            padding-top: 32px;
+            padding-bottom: 32px;
+        }
+
+        section:nth-child(odd) {
+            background-color: #f3f3f3;
+        }
+    </style>
+    <script>
+        var loci = {
+            pending: 0, 
+            callbacks: [],
+            cbsa_code_to_name: {}
+        };
+
+        function add_json(src, dst) {
+            loci.pending++;
+            $.get(src, function (res) {
+                loci[dst] = res;
+                loci.pending--;
+                if (loci.pending == 0) {
+                    loci.callbacks.map(function (f) {f("json_ready");})
+                }
+            })
+        }
+        add_json("data/cbsa_features.json", "cbsa")
+        add_json("data/cbsa_to_startups.json", "cbsa_to_startups")
+        add_json("data/cbsa_to_investments.json", "cbsa_to_investments")
+
+        _toFixed = function(n, decimals) {
+            return Math.round(n * Math.pow(10, decimals)) / (Math.pow(10, decimals)); 
+        };
+
+        function toFixed(x) {
+            return _toFixed(x, 2);
+        }
+
+        function dotDotDot(t) {
+            var N = 36;
+            if (t.length > N)
+                return t.substr(0, N-3) + "..."
+            return t;
+        }
+
+        function numberWithCommas(x) {
+            return x.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        }
+
+        String.prototype.hashCode = function(seed) {
+          var hash = 0, i, chr;
+          if (this.length === 0) return hash;
+          for (i = 0; i < this.length; i++) {
+            chr   = this.charCodeAt(i) * seed * (i*seed*seed);
+            hash  = ((hash << 5) - hash) + chr;
+            hash |= 0; // Convert to 32bit integer
+          }
+          return hash;
+        };
+
+        String.prototype.color = function() {
+            return "rgba(" +
+                Math.abs(this.hashCode(273) % 255) + "," +
+                Math.abs(this.hashCode(367) + 137) % 255 + "," +
+                Math.abs(this.hashCode(491) + 1782) % 255 + "," +
+                (((this.hashCode(417) + 432) % 255) / 400.0 + 0.7) + ")";
+        };
+
+        
+    </script>
+</head>
+<body>
+    <section class="hero is-dark">
+        <div class="hero-body">
+            <div class="container">
+                <h1 class="title is-1">
+                    Project Loci
+                </h1>
+                <h2 class="subtitle is-3">
+                    an interactive exploration of startup geography
+                </h2>
+            </div>
+        </div>
+    </section>
+
+    <section>
+        <div class="content container">
+            <h2 class="subtitle is-4" v-if="!cbsa">Here's where startups are being founded and funded.</h2>
+            <div class="columns">
+                <div class="column">
+                    <div id="founded-map" style="height:720px;"></div>
+                    <div id="map-controller">
+                        <div style="text-align:right;">
+                            <label class="checkbox" style="padding-right:12px;">
+                                <input v-model="startups" type="checkbox"> Show Startups
+                            </label>
+                            <label class="checkbox">
+                                <input v-model="investments" type="checkbox"> Show Investments
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <script>
+                loci.callbacks.push(function (e) {
+                    if (e != "json_ready") return;
+
+                    var map = L.map('founded-map', {attributionControl: false}).setView([38.3, -96.0], 5);
+                    L.tileLayer('https://api.tiles.mapbox.com/v4/{id}/{z}/{x}/{y}.png?access_token=pk.eyJ1Ijoia2V2eiIsImEiOiJjajY4cGx5YmQwazR3MzdueTdwdXdrZGtoIn0.v_NdOHYzLUGi-K8KZ1RFVA', {
+                        id: 'mapbox.streets',
+                        maxZoom: 8
+                    }).addTo(map);
+
+                    map.on("popupclose", function(e) {
+                        loci.callbacks.map(function (f) {f("investment_popup", false);})
+                    });
+
+                    function addStartups() {
+                        var max_nb_startups = 0;
+                        for (var cbsa in loci.cbsa_to_startups)
+                            max_nb_startups = Math.max(max_nb_startups, loci.cbsa_to_startups[cbsa].length)
+
+                        return L.geoJSON(loci.cbsa, {
+                            style: function (feature) {
+                                return {
+                                    weight: 0,
+                                    fillColor: "yellow",
+                                    fillOpacity: Math.max(loci.cbsa_to_startups[feature.properties.CBSAFP].length / max_nb_startups, 0.2)
+                                }
+                            },
+                            filter: function (feature) {
+                                loci.cbsa_code_to_name[feature.properties.CBSAFP] = feature.properties.CBSA_Title
+                                return !!loci.cbsa_to_startups[feature.properties.CBSAFP];
+                            }
+                        }).bindPopup(function (layer) {
+                            loci.callbacks.map(function (f) {f("investment_popup", layer.feature.properties);})
+                            return "<b>" + layer.feature.properties.CBSA_Title + "</b>:</br>" + 
+                                numberWithCommas(loci.cbsa_to_startups[layer.feature.properties.CBSAFP].length) + " startups";
+                        }).addTo(map);
+                    }
+
+                    function addInvestments() {
+                        var max_nb_investments = 0;
+                        for (var cbsa in loci.cbsa_to_investments)
+                            max_nb_investments = Math.max(max_nb_investments, loci.cbsa_to_investments[cbsa].length)
+
+                        return L.geoJSON(loci.cbsa, {
+                            style: function (feature) {
+                                return {
+                                    weight: 0,
+                                    fillColor: "green",
+                                    fillOpacity: Math.max(loci.cbsa_to_investments[feature.properties.CBSAFP].length / max_nb_investments, 0.5)
+                                }
+                            },
+                            filter: function (feature) {
+                                return !!loci.cbsa_to_investments[feature.properties.CBSAFP];
+                            }
+                        }).bindPopup(function (layer) {
+                            loci.callbacks.map(function (f) {f("investment_popup", layer.feature.properties);})
+                            return "<b>" + layer.feature.properties.CBSA_Title + "</b>:</br>" + 
+                                numberWithCommas(loci.cbsa_to_startups[layer.feature.properties.CBSAFP].length) + " startups<br/>" + 
+                                numberWithCommas(loci.cbsa_to_investments[layer.feature.properties.CBSAFP].length) + " investment events";
+                        }).addTo(map);
+                    }
+
+                    var startupLayer = addStartups();
+                    var investmentLayer = addInvestments();
+
+                    var vm = new Vue({
+                        el: "#map-controller",
+                        data: {
+                            startups: true,
+                            investments: true
+                        },
+                        watch: {
+                            startups: function (value, oldValue) {
+                                if (value) {
+                                    map.addLayer(startupLayer);
+                                    if (this.investments) {
+                                        map.removeLayer(investmentLayer);
+                                        map.addLayer(investmentLayer);
+                                    }
+                                }
+                                else
+                                    map.removeLayer(startupLayer);
+                            },
+                            investments: function (value, oldValue) {
+                                if (value)
+                                    map.addLayer(investmentLayer);
+                                else
+                                    map.removeLayer(investmentLayer);
+                            }
+                        }
+                    })
+                })
+            </script>
+            <div id="index-view" class="columns">
+                <div v-if="cbsa" class="column is-6">
+                    <h2 class="subtitle is-4">{{cbsa.CBSA_Title}}</h2>
+                    <p v-if="cbsa">
+                        There are <b>{{numberWithCommas(numberOfStartups())}}</b> startups in this area and 
+                        <b>{{numberWithCommas(numberOfInvestments())}}</b> investment events - this means that
+                        this region is relatively {{isActive() ? "active" : "inactive"}}.
+
+                        <br/><br/>
+
+                        <div v-if="percentStartupsWithInvestment() > 0">
+                            On average, less than <b>{{toFixed(100.0 * averagePercentStartupsWithInvestment)}}%</b> of startups get funded
+                            but in your region, {{aboveAveragePercentFunded() ? "over" : "only"}} <b>{{toFixed(100.0 * percentStartupsWithInvestment())}}%</b> 
+                            of startups have associated investment events.
+
+                            <br/><br/>
+
+                            A startup randomly selected from this region is <b>{{toFixed(percentStartupsWithInvestment() / averagePercentStartupsWithInvestment)}}</b>
+                            times more likely to get funded than the national average.
+                        </div>
+                    </p>
+                </div>
+                <div class="column">
+                    <h2 class="subtitle is-4" v-if="!cbsa">Select an interest region on the map.</h2>
+                    <table>
+                        <tr>
+                            <td></td>
+                            <td><b># startups</b></td>
+                            <td><b>% funded</b></td>
+                            <td><b>index</b></td>
+                        </tr>
+                        <tr v-for="cbsa_code in [41860, 14460, 39900, 35620, 47900, 42660, 28140, 26420, 38060]">
+                            <td><b>{{dotDotDot(loci.cbsa_code_to_name[cbsa_code])}}</b></td>
+                            <td>{{numberWithCommas(numberOfStartups(cbsa_code))}}</td>
+                            <td>{{toFixed(100.0 * percentStartupsWithInvestment(cbsa_code))}}</td>
+                            <td>{{toFixed(percentStartupsWithInvestment(cbsa_code) / averagePercentStartupsWithInvestment)}}</td>
+                        </tr>
+                    </table>
+                </div>
+            </div>
+        </div>
+        <script>
+            loci.callbacks.push(function (e) {
+                if (e != "json_ready") return;
+
+                var vm = new Vue({
+                    el: "#index-view",
+                    data: {
+                        cbsa: false
+                    },
+                    methods: {
+                        isActive: function (cbsa_code) {
+                            if (!cbsa_code) cbsa_code = this.cbsa.CBSAFP;
+                            return this.averageNumberOfStartups < this.numberOfStartups()
+                        },
+                        numberOfStartups: function (cbsa_code) {
+                            if (!cbsa_code) cbsa_code = this.cbsa.CBSAFP;
+                            return loci.cbsa_to_startups[cbsa_code].length;
+                        },
+                        numberOfInvestments: function (cbsa_code) {
+                            if (!cbsa_code) cbsa_code = this.cbsa.CBSAFP;
+                            if (!loci.cbsa_to_investments[cbsa_code])
+                                return 0;
+                            return loci.cbsa_to_investments[cbsa_code].length;
+                        },
+                        percentStartupsWithInvestment: function (cbsa_code) {
+                            if (!cbsa_code) cbsa_code = this.cbsa.CBSAFP;
+                            var total = 0.0;
+                            var count = 0.0;
+                            loci.cbsa_to_startups[cbsa_code].map(function (startup) {
+                                count += 1.0;
+                                total += startup.investments.length > 0 ? 1.0 : 0.0;
+                            })
+                            return total / count;
+                        },
+                        aboveAveragePercentFunded: function (cbsa_code) {
+                            if (!cbsa_code) cbsa_code = this.cbsa.CBSAFP;
+                            return this.percentStartupsWithInvestment(cbsa_code) > this.averagePercentStartupsWithInvestment
+                        }
+                    },
+                    computed: {
+                        averageNumberOfStartups: function () {
+                            var total = 0.0;
+                            var count = 0.0;
+                            for (var key in loci.cbsa_to_startups) {
+                                count += 1.0;
+                                total += loci.cbsa_to_startups[key].length;
+                            }
+                            return total / count;
+                        },
+                        averageNumberOfInvestments: function () {
+                            var total = 0.0;
+                            var count = 0.0;
+                            for (var key in loci.cbsa_to_startups) {
+                                count += 1.0;
+                                if (loci.cbsa_to_investments[key])
+                                    total += loci.cbsa_to_investments[key].length;
+                            }
+                            return total / count;
+                        },
+                        averagePercentStartupsWithInvestment: function () {
+                            var total = 0.0;
+                            var count = 0.0;
+                            for (var key in loci.cbsa_to_startups) {
+                                loci.cbsa_to_startups[key].map(function (startup) {
+                                    count += 1.0;
+                                    total += startup.investments.length > 0 ? 1.0 : 0.0;
+                                })
+                            }
+                            return total / count;
+                        }
+                    }
+                })
+                loci.callbacks.push(function (e, cbsa) {
+                    vm.cbsa = cbsa;
+                })
+            });
+        </script>
+    </section>
+
+    <section id="timelapse">
+        <div class="content container">
+            <h2 v-if="!region" class="subtitle is-4">Popular industries for startups in the US.</h2>
+            <h2 v-if="region" class="subtitle is-4">Popular industries for startups in {{region}}.</h2>
+            <pie-chart :industries="industries"></pie-chart>
+        </div>
+        <div v-if="region" class="content container">
+            <div class="columns">
+                <div class="column is-4">
+                    <p>
+                        Of course, knowing the distribution of industries in <b>{{region}}</b> only gives you 
+                        half the picture. The bar chart on the right shows how highly the industries in your
+                        region <b>index</b> against the national average.
+                        <br/>
+                        $$ index = \frac{P(industry | region)}{P(industry)} $$
+                        <br/>
+                        This can be interpreted as how many times more likely a startup in your region is to
+                        be in a certain industry than a random startup in the US.
+                    </p>
+                </div>
+                <div class="column">
+                    <bar-chart :industries="industries" :baseline_industries="all_industries" :start=0 :end=10></bar-chart>
+                </div>
+            </div>
+        </div>
+        <script>
+            Vue.component('pie-chart', {
+                extends: VueChartJs.Pie,
+                props: ["industries"],
+                mounted: function () {
+                    this.redraw()
+                },
+                watch: {
+                    industries: function () { this.redraw() }
+                },
+                methods: {
+                    redraw: function () {
+                        if (this._chart)
+                            this._chart.destroy()
+
+                        var industries = this.industries;
+                        var counts = {};
+                        for (var i = 0; i < industries.length; i++)
+                            counts[industries[i]] = (counts[industries[i]] + 1) || 1;
+
+                        var average = this.industries.length / Object.keys(counts).length;
+
+                        var keys = [];
+                        var values = [];
+                        for (var key in counts) {
+                            if (counts[key] > 0.5 * average) {
+                                keys.push(key);
+                                values.push(counts[key]);
+                            }
+                        }
+
+                        this.renderChart({
+                            labels: keys,
+                            datasets: [{
+                                data: values,
+                                backgroundColor: keys.map(function (txt) { return txt.color(17); })
+                            }],
+                        }, {responsive: true, maintainAspectRatio: false, legend: {position: "left"}})
+                    }
+                }
+            });
+
+            Vue.component('bar-chart', {
+                extends: VueChartJs.HorizontalBar,
+                props: ["industries", "baseline_industries", "start", "end"],
+                mounted: function () {
+                    this.redraw()
+                },
+                watch: {
+                    industries: function () { this.redraw() }
+                },
+                methods: {
+                    redraw: function () {
+                        if (this._chart)
+                            this._chart.destroy()
+
+                        var industries = this.industries;
+                        var baseline_industries = this.baseline_industries;
+
+                        var total = 0;
+                        var counts = {};
+                        for (var i = 0; i < industries.length; i++)
+                            if (industries[i]) {
+                                total += 1;
+                                counts[industries[i]] = (counts[industries[i]] + 1) || 1;
+                            }
+
+                        var baseline_total = 0;
+                        var baseline_counts = {};
+                        for (var i = 0; i < baseline_industries.length; i++)
+                            if (baseline_industries[i] && counts[baseline_industries[i]]) {
+                                baseline_total += 1;
+                                baseline_counts[baseline_industries[i]] = (baseline_counts[baseline_industries[i]] + 1) || 1;
+                            }
+
+                        console.log(counts, total)
+                        console.log(baseline_counts, baseline_total, baseline_industries.length)
+
+                        var sum = 0.0;
+                        var cnt = 0.0;
+                        var scores = {};
+                        for (var key in counts) {
+                            scores[key] = (counts[key] / total + 0.0001) / (baseline_counts[key] / baseline_total + 0.0001);
+                            sum += scores[key];
+                            cnt += 1;
+                        }
+                        console.log(scores)
+
+                        var keys = [];
+                        var values = [];
+                        for (var key in scores) {
+                            if (scores[key] > sum / cnt) {
+                                keys.push(key);
+                                values.push(Math.min(scores[key], 5.0));
+                            }
+                        }
+
+                        this.renderChart({
+                            labels: keys.slice(this.start, this.end),
+                            datasets: [{
+                                data: values.slice(this.start, this.end),
+                                backgroundColor: keys.slice(this.start, this.end).map(function (txt) { return txt.color(17); })
+                            }],
+                        }, {
+                            responsive: true, 
+                            maintainAspectRatio: false, 
+                            legend: false, 
+                            xAxes: [{
+                                ticks: {
+                                    autoSkip: false
+                                }
+                            }]
+                        })
+                    }
+                }
+            });
+
+            loci.callbacks.push(function (e) {
+                if (e != "json_ready") return;
+
+                var vm = new Vue({
+                    el: "#timelapse",
+                    data: {
+                        region: "",
+                        industries: [],
+                        all_industries: []
+                    }
+                });
+
+                vm.all_industries = [];
+                for (var cbsa in loci.cbsa_to_startups)
+                    loci.cbsa_to_startups[cbsa].map(function (obj) {
+                        if (obj.industry) {
+                            vm.all_industries.push(obj.industry);
+                        }
+                    })
+                vm.industries = vm.all_industries;
+
+                loci.callbacks.push(function (e, cbsa) {
+                    if (loci.cbsa_to_startups[cbsa.CBSAFP]) {
+                        vm.region = cbsa.CBSA_Title;
+                        vm.industries = [];
+                        loci.cbsa_to_startups[cbsa.CBSAFP].map(function (obj) {
+                            if (obj.industry) {
+                                vm.industries.push(obj.industry);
+                            }
+                        })
+                    } else {
+                        vm.region = false;
+                        vm.industries = vm.all_industries;
+                    }
+                })
+            });
+        </script>
+    </section>
+
+    <footer class="footer" style="background:#363636;">
+        <div class="container">
+            <div class="content has-text-centered" style="color:white;">
+                <p>
+                    <a class="icon" href="https://github.com/k15z/project-loci">
+                        <i class="fa fa-github"></i>
+                    </a>
+                </p>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>
